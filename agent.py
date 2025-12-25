@@ -4,7 +4,7 @@ from langchain.agents import create_agent as create_react_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langgraph.utils.config import get_store as get_context_store
 from langmem import create_manage_memory_tool, create_search_memory_tool
-from storage import get_store, get_client
+from storage import get_store, get_client, get_embeddings
 from config import LLM_MODEL, DB_NAME, logger
 
 
@@ -103,6 +103,7 @@ Provide helpful responses using both individual user preferences and group conve
     async def prompt_with_memories(state):
         """Prepare messages with system prompt and memory search"""
         store = get_store()
+        embeddings = get_embeddings()
         
         # Search for relevant memories based on the last user message
         user_metadata = state.get("user_metadata", {})
@@ -113,20 +114,65 @@ Provide helpful responses using both individual user preferences and group conve
         if state["messages"]:
             last_msg = state["messages"][-1].content if hasattr(state["messages"][-1], 'content') else str(state["messages"][-1])
             try:
-                # Search for memories related to:
-                # 1. The current user
-                # 2. The current chat/group
-                # 3. The message content
+                # Search for memories using vector similarity
                 search_query = f"{last_msg} user {user_id} chat {chat_id} {chat_title}"
                 
-                memories = await store.asearch(
-                    ("user_memories",),
-                    query=search_query,
-                    limit=10  # Increased limit for group context
-                )
-                memory_context = "\n".join([f"- {mem.value.get('content', str(mem.value))}" for mem in memories]) if memories else "No relevant memories found."
+                # Get embedding for the query
+                query_embedding = await embeddings.aembed_query(search_query)
+                
+                # Search in the store's MongoDB collection directly
+                from pymongo import DESCENDING
+                client = get_client()
+                db = client[DB_NAME]
+                collection = db["langmem_store"]
+                
+                # Perform vector search if supported, otherwise get recent items
+                try:
+                    # Try vector search
+                    pipeline = [
+                        {
+                            "$vectorSearch": {
+                                "index": "vector_index",
+                                "path": "embedding",
+                                "queryVector": query_embedding,
+                                "numCandidates": 50,
+                                "limit": 10
+                            }
+                        }
+                    ]
+                    results = list(collection.aggregate(pipeline))
+                    
+                    if results:
+                        memory_context = "\n".join([
+                            f"- {doc.get('value', {}).get('content', str(doc.get('value', {})))}" 
+                            for doc in results
+                        ])
+                    else:
+                        memory_context = "No relevant memories found."
+                        
+                except Exception as vector_error:
+                    logger.warning(f"Vector search not available, using basic search: {vector_error}")
+                    # Fallback to basic text search
+                    results = list(collection.find(
+                        {
+                            "$or": [
+                                {"key": {"$regex": str(user_id)}},
+                                {"key": {"$regex": str(chat_id)}},
+                                {"value.content": {"$regex": f".*{user_id}.*|.*{chat_id}.*", "$options": "i"}}
+                            ]
+                        }
+                    ).limit(10))
+                    
+                    if results:
+                        memory_context = "\n".join([
+                            f"- {doc.get('value', {}).get('content', str(doc.get('value', {})))}" 
+                            for doc in results
+                        ])
+                    else:
+                        memory_context = "No relevant memories found."
+                        
             except Exception as e:
-                logger.error(f"Error searching memories: {e}")
+                logger.error(f"Error searching memories: {e}", exc_info=True)
                 memory_context = "No relevant memories found."
         else:
             memory_context = "No relevant memories found."
@@ -195,7 +241,7 @@ async def get_agent_response(chat_id: str, user_id: str, user_input: str, user_m
         # Store user_id for tracking who said what
         config = {
             "configurable": {
-                "thread_id": f"telegram_chat_{chat_id}",  # Changed to chat_id
+                "thread_id": f"telegram_chat_{chat_id}",
                 "user_id": user_id,
                 "chat_id": chat_id,
             }
@@ -229,10 +275,15 @@ async def search_user_memories(user_id: str, query: str, limit: int = 5):
     Utility function to search memories for a specific user
     """
     try:
-        store = get_store()
-        user_namespace = ("user_memories",)
-        memories = await store.asearch(namespace=user_namespace, query=f"{query} user {user_id}", limit=limit)
-        return memories
+        client = get_client()
+        db = client[DB_NAME]
+        collection = db["langmem_store"]
+        
+        results = list(collection.find(
+            {"key": {"$regex": str(user_id)}}
+        ).limit(limit))
+        
+        return results
     except Exception as e:
         logger.error(f"Error searching memories for user {user_id}: {e}", exc_info=True)
         return []
@@ -243,10 +294,15 @@ async def search_chat_memories(chat_id: str, query: str, limit: int = 10):
     Utility function to search memories for a specific chat/group
     """
     try:
-        store = get_store()
-        user_namespace = ("user_memories",)
-        memories = await store.asearch(namespace=user_namespace, query=f"{query} chat {chat_id}", limit=limit)
-        return memories
+        client = get_client()
+        db = client[DB_NAME]
+        collection = db["langmem_store"]
+        
+        results = list(collection.find(
+            {"key": {"$regex": str(chat_id)}}
+        ).limit(limit))
+        
+        return results
     except Exception as e:
         logger.error(f"Error searching memories for chat {chat_id}: {e}", exc_info=True)
         return []
@@ -257,13 +313,20 @@ async def get_all_user_memories(user_id: str):
     Utility function to get all memories for a specific user
     """
     try:
-        store = get_store()
-        user_namespace = ("user_memories",)
-        memories = []
-        async for item in store.alist(namespace_prefix=user_namespace):
-            if str(user_id) in item.key or f"user {user_id}" in str(item.value):
-                memories.append(item)
-        return memories
+        client = get_client()
+        db = client[DB_NAME]
+        collection = db["langmem_store"]
+        
+        results = list(collection.find(
+            {
+                "$or": [
+                    {"key": {"$regex": str(user_id)}},
+                    {"value.content": {"$regex": str(user_id)}}
+                ]
+            }
+        ))
+        
+        return results
     except Exception as e:
         logger.error(f"Error getting all memories for user {user_id}: {e}", exc_info=True)
         return []

@@ -7,6 +7,18 @@ from config import MONGO_URI, DB_NAME, logger
 _store = None
 _user_profile_store = None
 _client = None
+_embeddings = None
+
+
+def get_embeddings():
+    """
+    Get or create the OpenAI embeddings instance
+    """
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        logger.info("✅ OpenAI Embeddings initialized")
+    return _embeddings
 
 
 def get_client():
@@ -28,17 +40,15 @@ def get_store():
     global _store
     
     if _store is None:
-        # Get client and create collection reference
+        # Get client and embeddings
         client = get_client()
         db = client[DB_NAME]
         collection = db["langmem_store"]
         
-        # Initialize embeddings for vector search
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        
+        # Create MongoDBStore with the collection object
         _store = MongoDBStore(
             collection=collection,
-            embeddings=embeddings
+            embeddings=get_embeddings()
         )
         
         logger.info("✅ LangMem MongoDB Store initialized")
@@ -57,17 +67,15 @@ def get_user_profile_store():
     global _user_profile_store
     
     if _user_profile_store is None:
-        # Get client and create collection reference
+        # Get client and embeddings
         client = get_client()
         db = client[DB_NAME]
         collection = db["user_profiles"]
         
-        # Initialize embeddings for vector search
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        
+        # Create MongoDBStore with the collection object
         _user_profile_store = MongoDBStore(
             collection=collection,
-            embeddings=embeddings
+            embeddings=get_embeddings()
         )
         
         logger.info("✅ User Profile MongoDB Store initialized")
@@ -81,10 +89,11 @@ def close_connections():
     """
     Close MongoDB connections gracefully
     """
-    global _client, _store, _user_profile_store
+    global _client, _store, _user_profile_store, _embeddings
     if _client is not None:
         _client.close()
         logger.info("MongoDB client connection closed")
         _client = None
         _store = None
         _user_profile_store = None
+        _embeddings = None
