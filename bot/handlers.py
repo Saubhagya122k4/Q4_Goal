@@ -62,9 +62,9 @@ class BotHandlers:
         user_id = str(user.id)
         chat_id = str(chat.id)
         user_input = update.message.text
-        
+
         logger.info(f"Received message from {user_id} (@{user.username}) in chat {chat_id} ({chat.type})")
-        
+
         # Prepare user metadata
         user_metadata = {
             "user_id": user_id,
@@ -74,22 +74,18 @@ class BotHandlers:
             "chat_type": chat.type,
             "chat_title": chat.title if hasattr(chat, 'title') else "Private Chat",
         }
-        
+
         try:
-            # Store/update user profile
-            await self.user_manager.store_user_profile(user_metadata)
-            
-            # Store chat context
-            await self.user_manager.store_chat_context(chat_id, user_metadata)
-            
-            # Update interaction tracking
-            await self.user_manager.update_interaction_count(user_id)
-            
-            # Get response from agent
+            # 1. Get response from agent and send to user first
             response = await self.agent.get_response(chat_id, user_id, user_input, user_metadata)
             await update.message.reply_text(response)
             logger.info(f"Sent response to user {user_id} in chat {chat_id}")
-            
+
+            # 2. After sending, store/update user profile, chat context, and interaction tracking
+            await self.user_manager.store_user_profile(user_metadata)
+            await self.user_manager.store_chat_context(chat_id, user_metadata)
+            await self.user_manager.update_interaction_count(user_id)
+
         except Exception as e:
             logger.error(f"Error handling message from user {user_id} in chat {chat_id}: {e}", exc_info=True)
             await update.message.reply_text(
