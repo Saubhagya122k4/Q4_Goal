@@ -61,59 +61,49 @@ class LangMemAgent(BaseAgent):
         return SystemPrompts.get_langmem_agent_prompt(user_metadata)
     
     async def _search_memories(self, user_metadata: Dict[str, Any], query: str) -> str:
-        """Search for relevant memories"""
+        """Search for relevant memories using MongoDB text search"""
         try:
             user_id = user_metadata.get('user_id')
             chat_id = user_metadata.get('chat_id')
-            chat_title = user_metadata.get('chat_title', '')
-            
-            search_query = f"{query} user {user_id} chat {chat_id} {chat_title}"
-            query_embedding = await self.db_client.embeddings.aembed_query(search_query)
+            username = user_metadata.get('username', '')
             
             db = self.db_client.client[self.settings.db_name]
             collection = db["langmem_store"]
             
-            try:
-                # Try vector search
-                pipeline = [
-                    {
-                        "$vectorSearch": {
-                            "index": "vector_index",
-                            "path": "embedding",
-                            "queryVector": query_embedding,
-                            "numCandidates": 50,
-                            "limit": 10
-                        }
-                    }
+            # Search for memories related to this user/chat
+            search_patterns = [
+                f"ID: {user_id}",
+                f"@{username}",
+                f"Chat ID: {chat_id}",
+                user_id,
+                username
+            ]
+            
+            # Build search query
+            search_query = {
+                "$or": [
+                    {"value.content": {"$regex": pattern, "$options": "i"}}
+                    for pattern in search_patterns if pattern
                 ]
-                results = list(collection.aggregate(pipeline))
+            }
+            
+            # Execute search
+            results = list(collection.find(search_query).limit(10))
+            
+            if results:
+                memory_texts = []
+                for doc in results:
+                    value = doc.get('value', {})
+                    content = value.get('content', '')
+                    if content:
+                        memory_texts.append(f"- {content}")
                 
-                if results:
-                    return "\n".join([
-                        f"- {doc.get('value', {}).get('content', str(doc.get('value', {})))}" 
-                        for doc in results
-                    ])
-                else:
-                    return "No relevant memories found."
-                    
-            except Exception:
-                logger.warning("Vector search not available, using basic search")
-                # Fallback to basic search
-                results = list(collection.find({
-                    "$or": [
-                        {"key": {"$regex": str(user_id)}},
-                        {"key": {"$regex": str(chat_id)}},
-                        {"value.content": {"$regex": f".*{user_id}.*|.*{chat_id}.*", "$options": "i"}}
-                    ]
-                }).limit(10))
-                
-                if results:
-                    return "\n".join([
-                        f"- {doc.get('value', {}).get('content', str(doc.get('value', {})))}" 
-                        for doc in results
-                    ])
-                else:
-                    return "No relevant memories found."
+                if memory_texts:
+                    logger.debug(f"Found {len(memory_texts)} memories for user {user_id}")
+                    return "\n".join(memory_texts)
+            
+            logger.debug(f"No memories found for user {user_id}")
+            return "No relevant memories found."
                     
         except Exception as e:
             logger.error(f"Error searching memories: {e}", exc_info=True)
@@ -129,12 +119,11 @@ class LangMemAgent(BaseAgent):
         memory_context = await self._search_memories(user_metadata, user_input)
         
         # Create system prompt with memories
-        base_prompt = self.create_system_prompt(user_metadata)
-        system_prompt = SystemPrompts.get_prompt_with_memories(base_prompt, memory_context)
-        
+        system_prompt = self.create_system_prompt(user_metadata)
+        logger.info(f"Base system: {system_prompt}")
         # Format user message
         user_message = SystemPrompts.format_user_message(user_input, user_metadata)
-        
+        logger.info(f"User message: {user_message}")
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
