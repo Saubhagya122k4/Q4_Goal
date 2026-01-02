@@ -5,8 +5,11 @@ from storage.mongodb_client import MongoDBClient
 from storage.stores import MemoryStore, UserProfileStore
 from memory.user_manager import UserManager
 from agents.langmem_agent import LangMemAgent
+from langchain_openai import OpenAIEmbeddings
 from bot.telegram_bot import TelegramBot
 from utils.logger import setup_logger
+from storage.checkpointer import CheckpointerManager
+from llm.openai_client import OpenAIClient
 
 
 def main():
@@ -23,12 +26,21 @@ def main():
         # Initialize MongoDB client
         db_client = MongoDBClient(settings.mongo_uri)
         
-        # Initialize stores
-        memory_store = MemoryStore(db_client, settings.db_name)
+        # Initialize embeddings for semantic search
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        
+        # Initialize stores (pass embeddings to MemoryStore)
+        memory_store = MemoryStore(db_client, settings.db_name, embedder=embeddings)
         profile_store = UserProfileStore(db_client, settings.db_name)
         
         # Initialize user manager
         user_manager = UserManager(profile_store, memory_store)
+        
+        # Initialize OpenAI client
+        openai_client = OpenAIClient(settings.openai_api_key)
+        
+        # Initialize checkpointer manager
+        checkpointer_manager = CheckpointerManager(db_client, settings.db_name)
         
         # Initialize agent
         agent = LangMemAgent(settings, db_client, memory_store)
