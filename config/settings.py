@@ -18,7 +18,6 @@ class Settings:
     # MongoDB Configuration
     mongo_uri: str = "mongodb://localhost:27017"
     db_name: str = "telegram_bot"
-    collection_name: str = "chat_history"
     
     def __post_init__(self):
         """Set environment variables after initialization"""
@@ -44,5 +43,4 @@ class Settings:
             llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
             mongo_uri=os.getenv("MONGO_URI", "mongodb://localhost:27017"),
             db_name=os.getenv("DB_NAME", "telegram_bot"),
-            collection_name=os.getenv("COLLECTION_NAME", "chat_history"),
         )
