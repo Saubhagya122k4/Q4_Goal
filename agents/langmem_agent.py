@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Dict, Any, List
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.agents import create_agent as create_react_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langmem import create_manage_memory_tool, create_search_memory_tool
@@ -33,6 +33,11 @@ class LangMemAgent(BaseAgent):
             temperature=0.3
         )
         
+        # Initialize embeddings for semantic search
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small"
+        )
+        
         # Initialize checkpointer
         self.checkpointer = MongoDBSaver(
             client=db_client.client,
@@ -40,10 +45,14 @@ class LangMemAgent(BaseAgent):
             checkpoint_collection_name="checkpoints"
         )
         
-        # Create memory tools
+        # Create memory tools (embedder is configured in the store)
         self.memory_tools = [
-            create_manage_memory_tool(namespace=("user_memories",)),
-            create_search_memory_tool(namespace=("user_memories",)),
+            create_manage_memory_tool(
+                namespace=("user_memories",)
+            ),
+            create_search_memory_tool(
+                namespace=("user_memories",)
+            ),
         ]
         
         # Create agent
@@ -52,6 +61,7 @@ class LangMemAgent(BaseAgent):
             tools=self.memory_tools,
             checkpointer=self.checkpointer,
             store=self.memory_store.store,
+            debug=True
         )
         
         logger.info(f"Created LangMemAgent with {len(self.memory_tools)} memory tools")
@@ -60,70 +70,18 @@ class LangMemAgent(BaseAgent):
         """Create system prompt with user context"""
         return SystemPrompts.get_langmem_agent_prompt(user_metadata)
     
-    async def _search_memories(self, user_metadata: Dict[str, Any], query: str) -> str:
-        """Search for relevant memories using MongoDB text search"""
-        try:
-            user_id = user_metadata.get('user_id')
-            chat_id = user_metadata.get('chat_id')
-            username = user_metadata.get('username', '')
-            
-            db = self.db_client.client[self.settings.db_name]
-            collection = db["langmem_store"]
-            
-            # Search for memories related to this user/chat
-            search_patterns = [
-                f"ID: {user_id}",
-                f"@{username}",
-                f"Chat ID: {chat_id}",
-                user_id,
-                username
-            ]
-            
-            # Build search query
-            search_query = {
-                "$or": [
-                    {"value.content": {"$regex": pattern, "$options": "i"}}
-                    for pattern in search_patterns if pattern
-                ]
-            }
-            
-            # Execute search
-            results = list(collection.find(search_query).limit(10))
-            
-            if results:
-                memory_texts = []
-                for doc in results:
-                    value = doc.get('value', {})
-                    content = value.get('content', '')
-                    if content:
-                        memory_texts.append(f"- {content}")
-                
-                if memory_texts:
-                    logger.debug(f"Found {len(memory_texts)} memories for user {user_id}")
-                    return "\n".join(memory_texts)
-            
-            logger.debug(f"No memories found for user {user_id}")
-            return "No relevant memories found."
-                    
-        except Exception as e:
-            logger.error(f"Error searching memories: {e}", exc_info=True)
-            return "No relevant memories found."
-    
     async def _prepare_messages(
         self, 
         user_input: str, 
         user_metadata: Dict[str, Any]
     ) -> List[Dict[str, str]]:
-        """Prepare messages with memory context"""
-        # Search for relevant memories
-        memory_context = await self._search_memories(user_metadata, user_input)
-        
-        # Create system prompt with memories
+        """Prepare messages for agent invocation"""
+        # Create system prompt
         system_prompt = self.create_system_prompt(user_metadata)
-        logger.info(f"Base system: {system_prompt}")
+        
         # Format user message
         user_message = SystemPrompts.format_user_message(user_input, user_metadata)
-        logger.info(f"User message: {user_message}")
+        
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
@@ -152,7 +110,7 @@ class LangMemAgent(BaseAgent):
             
             logger.debug(f"Invoking agent for user {user_id} in chat {chat_id}")
             
-            # Invoke agent
+            # Invoke agent - LangMem will automatically use search_memory tool when needed
             result = await self.agent.ainvoke(
                 {
                     "messages": messages,
