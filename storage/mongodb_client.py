@@ -21,7 +21,7 @@ class MongoDBClient:
         """Initialize MongoDB client"""
         if self._client is None:
             self._client = MongoClient(mongo_uri)
-            logger.info(f"✅ Connected to MongoDB at {mongo_uri}")
+            logger.info(f"✅ Connected to MongoDB")
     
     @property
     def client(self) -> MongoClient:
