@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Dict, Any, List
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.agents import create_agent as create_react_agent
+from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from agents.base_agent import BaseAgent
@@ -15,91 +15,131 @@ logger = setup_logger()
 
 
 class LangMemAgent(BaseAgent):
-    """Agent with LangMem memory capabilities"""
-    
+    """
+    Agent with LangMem long-term memory capabilities.
+    Provides per-chat scoped memory isolation and static system prompts.
+    """
+
     def __init__(
-        self, 
-        settings: Settings, 
-        db_client: MongoDBClient, 
-        memory_store: MemoryStore
+        self,
+        settings: Settings,
+        db_client: MongoDBClient,
+        memory_store: MemoryStore,
     ):
         self.settings = settings
         self.db_client = db_client
         self.memory_store = memory_store
-        
-        # Initialize LLM
+
+        # Initialize LLM (single shared LLM per instance)
         self.llm = ChatOpenAI(
             model=settings.llm_model,
-            temperature=0.3
+            temperature=0.3,
         )
-        
-        # Initialize embeddings for semantic search
-        self.embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small"
-        )
-        
-        # Initialize checkpointer
+
+        # MongoDB checkpointing for tool/agent state
         self.checkpointer = MongoDBSaver(
             client=db_client.client,
             db_name=settings.db_name,
-            checkpoint_collection_name="checkpoints"
+            checkpoint_collection_name="checkpoints",
         )
-        
-        # Create memory tools (embedder is configured in the store)
-        self.memory_tools = [
+
+        # Static system prompt
+        self._static_system_prompt = SystemPrompts.get_static_system_prompt()
+
+        logger.info("LangMemAgent initialized")
+
+    # ---------- INTERNAL HELPERS ----------
+
+    def _create_memory_tools(self, namespace: tuple) -> List[Any]:
+        """
+        Create a pair of memory tools bound to a namespace.
+        """
+        return [
             create_manage_memory_tool(
-                namespace=("user_memories",)
+                store=self.memory_store.store,
+                namespace=namespace,
             ),
             create_search_memory_tool(
-                namespace=("user_memories",)
+                store=self.memory_store.store,
+                namespace=namespace,
             ),
         ]
-        
-        # Create agent
-        self.agent = create_react_agent(
+
+    def _create_agent_with_tools(self, tools: List[Any]):
+        """
+        Create an agent configured with the given tools.
+        """
+        return create_agent(
             self.llm,
-            tools=self.memory_tools,
+            tools=tools,
             checkpointer=self.checkpointer,
-            store=self.memory_store.store,
-            debug=True
+            system_prompt=self._static_system_prompt,
+            debug=True,
         )
-        
-        logger.info(f"Created LangMemAgent with {len(self.memory_tools)} memory tools")
-    
-    def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
-        """Create system prompt with user context"""
-        return SystemPrompts.get_langmem_agent_prompt(user_metadata)
-    
+
     async def _prepare_messages(
-        self, 
-        user_input: str, 
-        user_metadata: Dict[str, Any]
+        self,
+        user_input: str,
+        user_metadata: Dict[str, Any],
     ) -> List[Dict[str, str]]:
-        """Prepare messages for agent invocation"""
-        # Create system prompt
-        system_prompt = self.create_system_prompt(user_metadata)
-        
-        # Format user message
-        user_message = SystemPrompts.format_user_message(user_input, user_metadata)
-        
+        """
+        Build the contextual user message including metadata.
+        """
+        current_datetime = datetime.now().strftime(
+            "%A, %B %d, %Y at %I:%M %p"
+        )
+
+        chat_type = user_metadata.get("chat_type", "unknown")
+        chat_title = user_metadata.get("chat_title", "a chat")
+        chat_id = user_metadata.get("chat_id")
+        user_id = user_metadata.get("user_id")
+        username = user_metadata.get("username", "N/A")
+        full_name = user_metadata.get("full_name", "N/A")
+
+        contextual_header = (
+            f"Context:\n"
+            f"- Time: {current_datetime}\n"
+            f"- User: {full_name} (@{username}, ID: {user_id})\n"
+            f"- Chat: {chat_title} (ID: {chat_id}, Type: {chat_type})\n\n"
+        )
+
+        formatted_user_message = SystemPrompts.format_user_message(
+            user_input, user_metadata
+        )
+
         return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {
+                "role": "user",
+                "content": contextual_header + formatted_user_message,
+            }
         ]
-    
+
+    # ---------- PUBLIC API ----------
+
     async def get_response(
-        self, 
-        chat_id: str, 
-        user_id: str, 
-        user_input: str, 
-        user_metadata: Dict[str, Any]
+        self,
+        chat_id: str,
+        user_id: str,
+        user_input: str,
+        user_metadata: Dict[str, Any],
     ) -> str:
-        """Get response from the agent"""
+        """
+        Generate a response using per-chat memory and scoped tools.
+        """
+
         try:
-            # Prepare messages
+            # Prepare full message context
             messages = await self._prepare_messages(user_input, user_metadata)
-            
-            # Configure agent
+
+            # Define per-chat namespace
+            namespace = ("user_memories", f"chat_{chat_id}")
+
+            # Build chat-scoped memory tools
+            memory_tools = self._create_memory_tools(namespace)
+
+            # Build agent bound to those tools
+            agent = self._create_agent_with_tools(memory_tools)
+
             config = {
                 "configurable": {
                     "thread_id": f"telegram_chat_{chat_id}",
@@ -107,25 +147,34 @@ class LangMemAgent(BaseAgent):
                     "chat_id": chat_id,
                 }
             }
-            
-            logger.debug(f"Invoking agent for user {user_id} in chat {chat_id}")
-            
-            # Invoke agent - LangMem will automatically use search_memory tool when needed
-            result = await self.agent.ainvoke(
+
+            result = await agent.ainvoke(
                 {
                     "messages": messages,
                     "user_metadata": user_metadata,
                 },
-                config=config
+                config=config,
             )
-            
-            # Extract response
+
             last_message = result["messages"][-1]
-            response_content = last_message.content
-            
-            logger.debug(f"Agent response generated for chat {chat_id}")
-            return response_content
-            
-        except Exception as e:
-            logger.error(f"Error in get_response for user {user_id} in chat {chat_id}: {e}", exc_info=True)
-            raise
+            response = last_message.content
+
+            logger.debug(
+                f"Agent response generated successfully for chat_id={chat_id}"
+            )
+
+            return response
+
+        except Exception as exc:
+            logger.error(
+                f"LangMemAgent failed for user={user_id}, chat={chat_id}: {exc}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                "Failed to generate agent response. Check logs for details."
+            ) from exc
+
+    def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
+        """Return the system prompt (static for now, can be extended with metadata)."""
+        # Use the static system prompt; extend using user_metadata if needed
+        return self._static_system_prompt
