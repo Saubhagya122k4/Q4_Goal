@@ -1,6 +1,5 @@
 from datetime import datetime
 from typing import Dict, Any, List
-from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langmem import create_manage_memory_tool, create_search_memory_tool
@@ -8,6 +7,7 @@ from agents.base_agent import BaseAgent
 from storage.mongodb_client import MongoDBClient
 from storage.stores import MemoryStore
 from config.settings import Settings
+from llm.openai_client import OpenAIClient
 from prompts.langmem_prompt import SystemPrompts
 from utils.logger import setup_logger
 
@@ -30,11 +30,9 @@ class LangMemAgent(BaseAgent):
         self.db_client = db_client
         self.memory_store = memory_store
 
-        # Initialize LLM (single shared LLM per instance)
-        self.llm = ChatOpenAI(
-            model=settings.llm_model,
-            temperature=0.3,
-        )
+        # Initialize OpenAI client and get LLM from it
+        self.openai_client = OpenAIClient(settings)
+        self.llm = self.openai_client.llm
 
         # MongoDB checkpointing for tool/agent state
         self.checkpointer = MongoDBSaver(
@@ -46,7 +44,7 @@ class LangMemAgent(BaseAgent):
         # Static system prompt
         self._static_system_prompt = SystemPrompts.get_static_system_prompt()
 
-        logger.info("LangMemAgent initialized")
+        logger.info("LangMemAgent initialized with shared OpenAI LLM client")
 
     # ---------- INTERNAL HELPERS ----------
 
@@ -132,7 +130,7 @@ class LangMemAgent(BaseAgent):
             messages = await self._prepare_messages(user_input, user_metadata)
 
             # Define per-chat namespace
-            namespace = ("user_memories", f"chat_{chat_id}")
+            namespace = (f"chat_{chat_id}")
 
             # Build chat-scoped memory tools
             memory_tools = self._create_memory_tools(namespace)
