@@ -119,34 +119,3 @@ class UserManager:
             
         except Exception as e:
             logger.error(f"Error updating interaction count for {user_id}: {e}", exc_info=True)
-    
-    async def store_user_preference(self, user_metadata: Dict[str, Any], preference: str) -> None:
-        """Store a user preference in memory store"""
-        try:
-            user_id = user_metadata.get('user_id')
-            username = user_metadata.get('username', 'N/A')
-            full_name = user_metadata.get('full_name', 'N/A')
-            
-            memory_content = f"User @{username} ({full_name}, ID: {user_id}) likes {preference}"
-            memory = {
-                "content": memory_content,
-                "telegram_data": {
-                    "user_id": user_id,
-                    "username": username,
-                    "full_name": full_name,
-                },
-                "created_at": datetime.now().isoformat(),
-                "type": "preference"
-            }
-            
-            namespace = ("user_memories",)
-            await self.memory_store.store.aput(
-                namespace=namespace,
-                key=f"preference_{preference}_{user_id}",
-                value=memory
-            )
-            
-            logger.info(f"Stored preference for user {user_id}: {preference}")
-            
-        except Exception as e:
-            logger.error(f"Error storing preference for {user_id}: {e}", exc_info=True)
