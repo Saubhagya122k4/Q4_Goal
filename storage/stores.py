@@ -35,7 +35,7 @@ class BaseStore:
                 index_config = create_vector_index_config(
                     dims=1536,  # text-embedding-3-small dimension
                     embed=self.embedder,
-                    name="vector_index",
+                    name="embedding",
                     relevance_score_fn="cosine"
                 )
                 # Set auto_index_timeout to 0 to not block on index creation
@@ -45,9 +45,10 @@ class BaseStore:
                     index_config=index_config,
                     auto_index_timeout=0
                 )
-                logger.info(f"⚠️  Vector index must be created manually in MongoDB Atlas")
+                logger.info(f"Vector index created in MongoDB Atlas")
             else:
                 self._store = MongoDBStore(collection=collection)
+                logger.info(f"⚠️  Vector index must be created manually in MongoDB Atlas")
             
             logger.info(f"✅ {self.__class__.__name__} initialized")
             logger.info(f"   Database: {self.db_name}")
