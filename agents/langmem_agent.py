@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from langchain.agents import create_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langmem import create_manage_memory_tool, create_search_memory_tool
@@ -8,6 +8,7 @@ from storage.mongodb_client import MongoDBClient
 from storage.stores import MemoryStore
 from config.settings import Settings
 from llm.openai_client import OpenAIClient
+from config.langfuse_client import LangfuseClient
 from prompts.langmem_prompt import SystemPrompts
 from utils.logger import setup_logger
 
@@ -16,7 +17,7 @@ logger = setup_logger()
 
 class LangMemAgent(BaseAgent):
     """
-    Agent with LangMem long-term memory capabilities.
+    Agent with LangMem long-term memory capabilities and Langfuse tracing.
     Provides per-chat scoped memory isolation and static system prompts.
     """
 
@@ -25,13 +26,15 @@ class LangMemAgent(BaseAgent):
         settings: Settings,
         db_client: MongoDBClient,
         memory_store: MemoryStore,
+        langfuse_client: Optional[LangfuseClient] = None,
     ):
         self.settings = settings
         self.db_client = db_client
         self.memory_store = memory_store
+        self.langfuse_client = langfuse_client
 
-        # Initialize OpenAI client and get LLM from it
-        self.openai_client = OpenAIClient(settings)
+        # Initialize OpenAI client with Langfuse integration
+        self.openai_client = OpenAIClient(settings, langfuse_client)
         self.llm = self.openai_client.llm
 
         # MongoDB checkpointing for tool/agent state
@@ -44,14 +47,12 @@ class LangMemAgent(BaseAgent):
         # Static system prompt
         self._static_system_prompt = SystemPrompts.get_static_system_prompt()
 
-        logger.info("LangMemAgent initialized with shared OpenAI LLM client")
+        logger.info("LangMemAgent initialized with Langfuse tracing")
 
     # ---------- INTERNAL HELPERS ----------
 
     def _create_memory_tools(self, namespace: tuple) -> List[Any]:
-        """
-        Create a pair of memory tools bound to a namespace.
-        """
+        """Create a pair of memory tools bound to a namespace."""
         return [
             create_manage_memory_tool(
                 store=self.memory_store.store,
@@ -64,9 +65,7 @@ class LangMemAgent(BaseAgent):
         ]
 
     def _create_agent_with_tools(self, tools: List[Any]):
-        """
-        Create an agent configured with the given tools.
-        """
+        """Create an agent configured with the given tools."""
         return create_agent(
             self.llm,
             tools=tools,
@@ -80,12 +79,8 @@ class LangMemAgent(BaseAgent):
         user_input: str,
         user_metadata: Dict[str, Any],
     ) -> List[Dict[str, str]]:
-        """
-        Build the contextual user message including metadata.
-        """
-        current_datetime = datetime.now().strftime(
-            "%A, %B %d, %Y at %I:%M %p"
-        )
+        """Build the contextual user message including metadata."""
+        current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         chat_type = user_metadata.get("chat_type", "unknown")
         chat_title = user_metadata.get("chat_title", "a chat")
@@ -101,14 +96,10 @@ class LangMemAgent(BaseAgent):
             f"- Chat: {chat_title} (ID: {chat_id}, Type: {chat_type})\n\n"
         )
 
-        formatted_user_message = SystemPrompts.format_user_message(
-            user_input, user_metadata
-        )
-
         return [
             {
                 "role": "user",
-                "content": contextual_header + formatted_user_message,
+                "content": contextual_header + user_input,
             }
         ]
 
@@ -121,16 +112,14 @@ class LangMemAgent(BaseAgent):
         user_input: str,
         user_metadata: Dict[str, Any],
     ) -> str:
-        """
-        Generate a response using per-chat memory and scoped tools.
-        """
-
+        """Generate a response using per-chat memory and scoped tools with Langfuse tracing."""
+        
         try:
             # Prepare full message context
             messages = await self._prepare_messages(user_input, user_metadata)
 
             # Define per-chat namespace
-            namespace = (f"chat_{chat_id}")
+            namespace = (f"chat_{chat_id}",)
 
             # Build chat-scoped memory tools
             memory_tools = self._create_memory_tools(namespace)
@@ -143,8 +132,20 @@ class LangMemAgent(BaseAgent):
                     "thread_id": f"telegram_chat_{chat_id}",
                     "user_id": user_id,
                     "chat_id": chat_id,
+                },
+                "metadata": {
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "chat_type": user_metadata.get("chat_type"),
+                    "chat_title": user_metadata.get("chat_title"),
+                    "username": user_metadata.get("username"),
+                    "full_name": user_metadata.get("full_name"),
                 }
             }
+            
+            # Add Langfuse callback to config if available
+            if self.langfuse_client and self.langfuse_client.is_enabled():
+                config["callbacks"] = [self.langfuse_client.callback_handler]
 
             result = await agent.ainvoke(
                 {
@@ -157,9 +158,7 @@ class LangMemAgent(BaseAgent):
             last_message = result["messages"][-1]
             response = last_message.content
 
-            logger.debug(
-                f"Agent response generated successfully for chat_id={chat_id}"
-            )
+            logger.debug(f"Agent response generated successfully for chat_id={chat_id}")
 
             return response
 
@@ -171,8 +170,11 @@ class LangMemAgent(BaseAgent):
             raise RuntimeError(
                 "Failed to generate agent response. Check logs for details."
             ) from exc
+        finally:
+            # Flush Langfuse traces
+            if self.langfuse_client and self.langfuse_client.is_enabled():
+                self.langfuse_client.flush()
 
     def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
         """Return the system prompt (static for now, can be extended with metadata)."""
-        # Use the static system prompt; extend using user_metadata if needed
         return self._static_system_prompt
