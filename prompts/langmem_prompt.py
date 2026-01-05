@@ -90,14 +90,3 @@ Example Good Responses:
   Response: "Alice Johnson is the team lead for the Development Team." (retrieved from memory)
 
 Note: Current context (timestamp, user details, chat information) is provided with each request separately."""
-
-    @staticmethod
-    def format_user_message(user_input: str, user_metadata: Dict[str, Any]) -> str:
-        """Format user message based on chat type"""
-        chat_type = user_metadata.get('chat_type', 'private')
-        username = user_metadata.get('username', 'User')
-        full_name = user_metadata.get('full_name', 'User')
-
-        if chat_type in ['group', 'supergroup']:
-            return f"@{username} ({full_name}): {user_input}"
-        return user_input
