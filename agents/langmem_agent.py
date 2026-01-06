@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from langchain.agents import create_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langmem import create_manage_memory_tool, create_search_memory_tool
@@ -8,7 +8,6 @@ from storage.mongodb_client import MongoDBClient
 from storage.stores import MemoryStore
 from config.settings import Settings
 from llm.openai_client import OpenAIClient
-from config.langfuse_client import LangfuseClient
 from prompts.langmem_prompt import SystemPrompts
 from utils.logger import setup_logger
 
@@ -17,7 +16,7 @@ logger = setup_logger()
 
 class LangMemAgent(BaseAgent):
     """
-    Agent with LangMem long-term memory capabilities and Langfuse tracing.
+    Agent with LangMem long-term memory capabilities.
     Provides per-chat scoped memory isolation and static system prompts.
     """
 
@@ -26,15 +25,13 @@ class LangMemAgent(BaseAgent):
         settings: Settings,
         db_client: MongoDBClient,
         memory_store: MemoryStore,
-        langfuse_client: Optional[LangfuseClient] = None,
     ):
         self.settings = settings
         self.db_client = db_client
         self.memory_store = memory_store
-        self.langfuse_client = langfuse_client
 
-        # Initialize OpenAI client with Langfuse integration
-        self.openai_client = OpenAIClient(settings, langfuse_client)
+        # Initialize OpenAI client
+        self.openai_client = OpenAIClient(settings)
         self.llm = self.openai_client.llm
 
         # MongoDB checkpointing for tool/agent state
@@ -47,7 +44,7 @@ class LangMemAgent(BaseAgent):
         # Static system prompt
         self._static_system_prompt = SystemPrompts.get_static_system_prompt()
 
-        logger.info("LangMemAgent initialized with Langfuse tracing")
+        logger.info("LangMemAgent initialized")
 
     # ---------- INTERNAL HELPERS ----------
 
@@ -71,7 +68,7 @@ class LangMemAgent(BaseAgent):
             tools=tools,
             checkpointer=self.checkpointer,
             system_prompt=self._static_system_prompt,
-            debug=True,
+            debug=False,
         )
 
     async def _prepare_messages(
@@ -112,7 +109,7 @@ class LangMemAgent(BaseAgent):
         user_input: str,
         user_metadata: Dict[str, Any],
     ) -> str:
-        """Generate a response using per-chat memory and scoped tools with Langfuse tracing."""
+        """Generate a response using per-chat memory."""
         
         try:
             # Prepare full message context
@@ -127,9 +124,13 @@ class LangMemAgent(BaseAgent):
             # Build agent bound to those tools
             agent = self._create_agent_with_tools(memory_tools)
 
+            # Prepare session ID (chat-specific)
+            session_id = f"telegram_chat_{chat_id}"
+
+            # Config with metadata for logging and debugging
             config = {
                 "configurable": {
-                    "thread_id": f"telegram_chat_{chat_id}",
+                    "thread_id": session_id,
                     "user_id": user_id,
                     "chat_id": chat_id,
                 },
@@ -140,13 +141,11 @@ class LangMemAgent(BaseAgent):
                     "chat_title": user_metadata.get("chat_title"),
                     "username": user_metadata.get("username"),
                     "full_name": user_metadata.get("full_name"),
+                    "timestamp": datetime.now().isoformat(),
                 }
             }
-            
-            # Add Langfuse callback to config if available
-            if self.langfuse_client and self.langfuse_client.is_enabled():
-                config["callbacks"] = [self.langfuse_client.callback_handler]
 
+            # Invoke agent
             result = await agent.ainvoke(
                 {
                     "messages": messages,
@@ -158,7 +157,7 @@ class LangMemAgent(BaseAgent):
             last_message = result["messages"][-1]
             response = last_message.content
 
-            logger.debug(f"Agent response generated successfully for chat_id={chat_id}")
+            logger.debug(f"Agent response generated for user={user_id}, chat={chat_id}")
 
             return response
 
@@ -170,10 +169,6 @@ class LangMemAgent(BaseAgent):
             raise RuntimeError(
                 "Failed to generate agent response. Check logs for details."
             ) from exc
-        finally:
-            # Flush Langfuse traces
-            if self.langfuse_client and self.langfuse_client.is_enabled():
-                self.langfuse_client.flush()
 
     def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
         """Return the system prompt (static for now, can be extended with metadata)."""
