@@ -63,6 +63,66 @@ class LangfuseClient:
         """Get Langfuse callback handler for LangChain"""
         return self._callback_handler
     
+    def create_user_callback_handler(
+        self, 
+        user_id: str, 
+        session_id: str,
+        user_metadata: Optional[dict] = None
+    ) -> Optional[CallbackHandler]:
+        """
+        Create a user-specific callback handler with user context.
+        
+        User identification in Langfuse is done via the CallbackHandler initialization
+        with user_id and session_id parameters, plus additional metadata.
+        
+        Args:
+            user_id: Telegram user ID (will be used as Langfuse user_id)
+            session_id: Session/chat identifier (will be used as Langfuse session_id)
+            user_metadata: Additional user metadata (username, full_name, etc.)
+        
+        Returns:
+            CallbackHandler configured with user context
+        """
+        if not self.is_enabled():
+            return None
+        
+        try:
+            # Prepare user metadata for Langfuse
+            metadata = {
+                "telegram_user_id": user_id,
+                "session_id": session_id,
+            }
+            
+            if user_metadata:
+                # Add additional user context
+                if "username" in user_metadata:
+                    metadata["username"] = user_metadata["username"]
+                if "full_name" in user_metadata:
+                    metadata["full_name"] = user_metadata["full_name"]
+                if "chat_type" in user_metadata:
+                    metadata["chat_type"] = user_metadata["chat_type"]
+                if "chat_title" in user_metadata:
+                    metadata["chat_title"] = user_metadata["chat_title"]
+                if "chat_id" in user_metadata:
+                    metadata["chat_id"] = user_metadata["chat_id"]
+            
+            # Create callback handler with user_id and session_id
+            handler = CallbackHandler(
+                user_id=user_id,
+                session_id=session_id,
+                metadata=metadata,
+            )
+            
+            logger.debug(
+                f"Created user-specific callback handler: "
+                f"user_id={user_id}, session_id={session_id}"
+            )
+            return handler
+            
+        except Exception as e:
+            logger.error(f"Error creating user callback handler: {e}")
+            return None
+    
     def is_enabled(self) -> bool:
         """Check if Langfuse is enabled and ready"""
         return self._client is not None and self._callback_handler is not None
@@ -77,7 +137,7 @@ class LangfuseClient:
                 logger.error(f"Error flushing Langfuse traces: {e}")
     
     def shutdown(self):
-        """Shutdown Langfuse client"""
+        """Shutdown Langfuse client (synchronous)"""
         if self._client:
             try:
                 self.flush()
