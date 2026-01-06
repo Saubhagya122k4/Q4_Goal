@@ -8,7 +8,7 @@ logger = setup_logger()
 
 
 class BaseStore:
-    """Base class for MongoDB stores"""
+    """Base class for MongoDB stores with async initialization"""
     
     def __init__(
         self, 
@@ -22,39 +22,48 @@ class BaseStore:
         self.collection_name = collection_name
         self.embedder = embedder
         self._store: Optional[MongoDBStore] = None
+        self._initialized = False
+    
+    async def initialize(self):
+        """Initialize MongoDBStore instance"""
+        if self._initialized:
+            return
+        
+        # Get synchronous collection for LangGraph
+        collection = self.db_client.get_sync_collection(
+            self.db_name, 
+            self.collection_name
+        )
+        
+        # Configure vector index if embedder is available
+        if self.embedder:
+            index_config = create_vector_index_config(
+                dims=1536,
+                embed=self.embedder,
+                name="embedding",
+                relevance_score_fn="cosine"
+            )
+            self._store = MongoDBStore(
+                collection=collection,
+                index_config=index_config,
+                auto_index_timeout=0
+            )
+            logger.info(f"Vector index configured for {self.__class__.__name__}")
+        else:
+            self._store = MongoDBStore(collection=collection)
+            logger.info(f"⚠️  Vector index must be created manually in MongoDB Atlas")
+        
+        self._initialized = True
+        logger.info(f"✅ {self.__class__.__name__} initialized")
+        logger.info(f"   Database: {self.db_name}")
+        logger.info(f"   Collection: {self.collection_name}")
+        logger.info(f"   Embedder: {'Enabled' if self.embedder else 'Disabled'}")
     
     @property
     def store(self) -> MongoDBStore:
-        """Get or create MongoDBStore instance"""
-        if self._store is None:
-            db = self.db_client.client[self.db_name]
-            collection = db[self.collection_name]
-            
-            # Configure vector index if embedder is available
-            if self.embedder:
-                index_config = create_vector_index_config(
-                    dims=1536,  # text-embedding-3-small dimension
-                    embed=self.embedder,
-                    name="embedding",
-                    relevance_score_fn="cosine"
-                )
-                # Set auto_index_timeout to 0 to not block on index creation
-                # Index must be created manually in MongoDB Atlas
-                self._store = MongoDBStore(
-                    collection=collection,
-                    index_config=index_config,
-                    auto_index_timeout=0
-                )
-                logger.info(f"Vector index created in MongoDB Atlas")
-            else:
-                self._store = MongoDBStore(collection=collection)
-                logger.info(f"⚠️  Vector index must be created manually in MongoDB Atlas")
-            
-            logger.info(f"✅ {self.__class__.__name__} initialized")
-            logger.info(f"   Database: {self.db_name}")
-            logger.info(f"   Collection: {self.collection_name}")
-            logger.info(f"   Embedder: {'Enabled' if self.embedder else 'Disabled'}")
-        
+        """Get MongoDBStore instance"""
+        if not self._initialized or self._store is None:
+            raise RuntimeError(f"{self.__class__.__name__} not initialized. Call initialize() first.")
         return self._store
 
 
