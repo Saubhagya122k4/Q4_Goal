@@ -16,11 +16,7 @@ class TelegramBot:
         self.agent = agent
         self.user_manager = user_manager
         self.handlers = BotHandlers(agent, user_manager)
-        
-        # Build application
         self.app = ApplicationBuilder().token(settings.telegram_bot_token).build()
-        
-        # Register handlers
         self._register_handlers()
     
     def _register_handlers(self):
@@ -31,14 +27,21 @@ class TelegramBot:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.message_handler)
         )
     
-    def run(self):
-        """Start the bot"""
+    async def run(self):
+        """Start the bot with async/await"""
         logger.info("🤖 Telegram bot is running...")
         print("🤖 Telegram bot is running... (Press Ctrl+C to stop)")
         
-        try:
-            self.app.run_polling()
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
-        except Exception as e:
-            logger.error(f"Bot crashed: {e}", exc_info=True)
+        async with self.app:
+            await self.app.start()
+            await self.app.updater.start_polling(allowed_updates=["message"])
+            
+            # Keep running until interrupted
+            import asyncio
+            try:
+                await asyncio.Event().wait()
+            except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+                logger.info("Received stop signal")
+            finally:
+                # Stop updater before exiting context
+                await self.app.updater.stop()
