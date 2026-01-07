@@ -57,36 +57,16 @@ async def main():
     """Main entry point"""
     logger = setup_logger()
     db_client = None
-    
-    # Setup signal handlers
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-    
-    def signal_handler(sig):
-        logger.info(f"Received signal {sig}, initiating shutdown...")
-        stop_event.set()
-    
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+    bot = None
     
     try:
         bot, db_client = await initialize_app()
-        
-        # Run bot in background task
-        bot_task = asyncio.create_task(bot.run())
-        
-        # Wait for stop signal
-        await stop_event.wait()
-        
-        # Cancel bot task
-        bot_task.cancel()
-        try:
-            await bot_task
-        except asyncio.CancelledError:
-            logger.info("Bot task cancelled")
+        await bot.run()
         
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
+    except asyncio.CancelledError:
+        logger.info("Bot task cancelled")
     except Exception as e:
         logger.error(f"Bot crashed: {e}", exc_info=True)
         raise
