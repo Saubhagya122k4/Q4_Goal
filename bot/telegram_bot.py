@@ -32,16 +32,22 @@ class TelegramBot:
         logger.info("🤖 Telegram bot is running...")
         print("🤖 Telegram bot is running... (Press Ctrl+C to stop)")
         
-        async with self.app:
-            await self.app.start()
-            await self.app.updater.start_polling(allowed_updates=["message"])
-            
-            # Keep running until interrupted
-            import asyncio
-            try:
-                await asyncio.Event().wait()
-            except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
-                logger.info("Received stop signal")
-            finally:
-                # Stop updater before exiting context
-                await self.app.updater.stop()
+        await self.app.initialize()
+        await self.app.start()
+        await self.app.updater.start_polling(allowed_updates=["message"])
+        
+        # Keep running until interrupted
+        import asyncio
+        try:
+            await asyncio.Event().wait()
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+            logger.info("Received stop signal, shutting down...")
+        finally:
+            # Proper shutdown sequence
+            logger.info("Stopping updater...")
+            await self.app.updater.stop()
+            logger.info("Stopping application...")
+            await self.app.stop()
+            logger.info("Shutting down application...")
+            await self.app.shutdown()
+            logger.info("Bot shutdown complete")
