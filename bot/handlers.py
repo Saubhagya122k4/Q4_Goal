@@ -1,0 +1,97 @@
+from telegram import Update
+from telegram.ext import ContextTypes
+from typing import Callable, Awaitable
+from memory.user_manager import UserManager
+from agents.base_agent import BaseAgent
+from utils.logger import setup_logger
+
+logger = setup_logger()
+
+
+class BotHandlers:
+    """Telegram bot message handlers"""
+    
+    def __init__(self, agent: BaseAgent, user_manager: UserManager):
+        self.agent = agent
+        self.user_manager = user_manager
+    
+    async def start_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /start command"""
+        user = update.effective_user
+        chat = update.effective_chat
+        logger.info(f"User {user.id} (@{user.username}) started the bot in chat {chat.id} ({chat.type})")
+        
+        await update.message.reply_text(
+            "👋 Hi! I'm an AI assistant powered by OpenAI GPT-4o Mini.\n"
+            "I can remember conversations in this group and individual preferences.\n"
+            "Just chat naturally and I'll help you!"
+        )
+    
+    async def profile_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /profile command"""
+        user = update.effective_user
+        user_id = str(user.id)
+        
+        logger.info(f"User {user_id} requested their profile")
+        
+        try:
+            profile = await self.user_manager.get_user_profile(user_id)
+            
+            if profile:
+                telegram_data = profile.get('telegram_data', {})
+                response = (
+                    "👤 **Your Stored Profile:**\n\n"
+                    f"🆔 User ID: `{telegram_data.get('user_id')}`\n"
+                    f"👤 Name: {telegram_data.get('full_name', 'N/A')}\n"
+                    f"🔖 Username: @{telegram_data.get('username', 'N/A')}\n"
+                    f"📅 Last Updated: {profile.get('last_updated', 'Unknown')}\n"
+                )
+            else:
+                response = "No profile found. Send me a message first!"
+            
+            await update.message.reply_text(response, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error retrieving profile for {user_id}: {e}", exc_info=True)
+            await update.message.reply_text("Error retrieving your profile.")
+    
+    async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle text messages"""
+        user = update.effective_user
+        chat = update.effective_chat
+        user_id = str(user.id)
+        chat_id = str(chat.id)
+        user_input = update.message.text
+        
+        logger.info(f"Received message from {user_id} (@{user.username}) in chat {chat_id} ({chat.type})")
+        
+        # Prepare user metadata
+        user_metadata = {
+            "user_id": user_id,
+            "username": user.username or "N/A",
+            "full_name": user.full_name or "N/A",
+            "chat_id": chat_id,
+            "chat_type": chat.type,
+            "chat_title": chat.title if hasattr(chat, 'title') else "Private Chat",
+        }
+        
+        try:
+            # Store/update user profile
+            await self.user_manager.store_user_profile(user_metadata)
+            
+            # Store chat context
+            await self.user_manager.store_chat_context(chat_id, user_metadata)
+            
+            # Update interaction tracking
+            await self.user_manager.update_interaction_count(user_id)
+            
+            # Get response from agent
+            response = await self.agent.get_response(chat_id, user_id, user_input, user_metadata)
+            await update.message.reply_text(response)
+            logger.info(f"Sent response to user {user_id} in chat {chat_id}")
+            
+        except Exception as e:
+            logger.error(f"Error handling message from user {user_id} in chat {chat_id}: {e}", exc_info=True)
+            await update.message.reply_text(
+                "Sorry, I encountered an error processing your message. Please try again."
+            )
