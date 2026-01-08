@@ -1,42 +1,27 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, AIMessage
-from memory import get_chat_history
-
-# Initialize LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    temperature=0.7
-)
+from agent import get_agent_response
+from config import logger
+from user_manager import store_user_profile, update_user_interaction_count
 
 
 async def get_response(user_id: str, user_input: str, user_metadata: dict) -> str:
     """
-    Get AI response with chat history context and user metadata
+    Get AI response using LangMem-powered agent for persistent memory
     """
-    # Get chat history for this user
-    chat_history = get_chat_history(user_id)
-    
-    # Get previous messages
-    previous_messages = chat_history.messages
-    
-    # Create message list with history
-    messages = previous_messages + [HumanMessage(content=user_input)]
-    
-    # Get AI response
-    response = await llm.ainvoke(messages)
-    
-    # Save both user message and AI response to history with metadata
-    chat_history.add_message(
-        HumanMessage(
-            content=user_input,
-            additional_kwargs={"metadata": user_metadata}
-        )
-    )
-    chat_history.add_message(
-        AIMessage(
-            content=response.content,
-            additional_kwargs={"metadata": {"response_to": user_id}}
-        )
-    )
-    
-    return response.content
+    try:
+        logger.info(f"Processing message from user {user_id} (@{user_metadata.get('username', 'N/A')})")
+        
+        # Store/update user profile in memory
+        await store_user_profile(user_metadata)
+        
+        # Update interaction tracking
+        await update_user_interaction_count(user_id)
+        
+        # Use the agent with LangMem capabilities
+        response = await get_agent_response(user_id, user_input, user_metadata)
+        
+        logger.info(f"Generated response for user {user_id}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error processing message for user {user_id}: {e}", exc_info=True)
+        raise
