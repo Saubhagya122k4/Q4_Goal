@@ -30,7 +30,7 @@ class LangMemAgent(BaseAgent):
         # Initialize LLM
         self.llm = ChatOpenAI(
             model=settings.llm_model,
-            temperature=0.7
+            temperature=0.3
         )
         
         # Initialize checkpointer
