@@ -21,7 +21,7 @@ def main():
         logger.info(f"Loaded settings - Database: {settings.db_name}")
         
         # Initialize MongoDB client
-        db_client = MongoDBClient(settings.mongo_uri, settings.embeddings_model)
+        db_client = MongoDBClient(settings.mongo_uri)
         
         # Initialize stores
         memory_store = MemoryStore(db_client, settings.db_name)

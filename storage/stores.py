@@ -22,10 +22,7 @@ class BaseStore:
             db = self.db_client.client[self.db_name]
             collection = db[self.collection_name]
             
-            self._store = MongoDBStore(
-                collection=collection,
-                embeddings=self.db_client.embeddings
-            )
+            self._store = MongoDBStore(collection=collection)
             
             logger.info(f"✅ {self.__class__.__name__} initialized")
             logger.info(f"   Database: {self.db_name}")
@@ -39,7 +36,6 @@ class MemoryStore(BaseStore):
     
     def __init__(self, db_client: MongoDBClient, db_name: str):
         super().__init__(db_client, db_name, "langmem_store")
-        logger.info("   Vector search enabled with OpenAI embeddings")
 
 
 class UserProfileStore(BaseStore):

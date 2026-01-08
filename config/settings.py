@@ -20,9 +20,6 @@ class Settings:
     db_name: str = "telegram_bot"
     collection_name: str = "chat_history"
     
-    # Embeddings Configuration
-    embeddings_model: str = "text-embedding-3-small"
-    
     def __post_init__(self):
         """Set environment variables after initialization"""
         if self.openai_api_key:
