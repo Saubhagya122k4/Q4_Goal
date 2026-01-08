@@ -18,12 +18,24 @@ class Settings:
     # MongoDB Configuration
     mongo_uri: str = "mongodb://localhost:27017"
     db_name: str = "telegram_bot"
-    collection_name: str = "chat_history"
+    
+    # Langfuse Configuration
+    langfuse_secret_key: Optional[str] = None
+    langfuse_public_key: Optional[str] = None
+    langfuse_base_url: Optional[str] = None
     
     def __post_init__(self):
         """Set environment variables after initialization"""
         if self.openai_api_key:
             os.environ["OPENAI_API_KEY"] = self.openai_api_key
+        
+        # Set Langfuse environment variables
+        if self.langfuse_secret_key:
+            os.environ["LANGFUSE_SECRET_KEY"] = self.langfuse_secret_key
+        if self.langfuse_public_key:
+            os.environ["LANGFUSE_PUBLIC_KEY"] = self.langfuse_public_key
+        if self.langfuse_base_url:
+            os.environ["LANGFUSE_HOST"] = self.langfuse_base_url
     
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -44,5 +56,7 @@ class Settings:
             llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
             mongo_uri=os.getenv("MONGO_URI", "mongodb://localhost:27017"),
             db_name=os.getenv("DB_NAME", "telegram_bot"),
-            collection_name=os.getenv("COLLECTION_NAME", "chat_history"),
+            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+            langfuse_base_url=os.getenv("LANGFUSE_BASE_URL"),
         )

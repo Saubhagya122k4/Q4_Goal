@@ -1,13 +1,13 @@
 from datetime import datetime
 from typing import Dict, Any, List
-from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent as create_react_agent
+from langchain.agents import create_agent
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langmem import create_manage_memory_tool, create_search_memory_tool
 from agents.base_agent import BaseAgent
 from storage.mongodb_client import MongoDBClient
 from storage.stores import MemoryStore
 from config.settings import Settings
+from llm.openai_client import OpenAIClient
 from prompts.langmem_prompt import SystemPrompts
 from utils.logger import setup_logger
 
@@ -15,159 +15,161 @@ logger = setup_logger()
 
 
 class LangMemAgent(BaseAgent):
-    """Agent with LangMem memory capabilities"""
-    
+    """
+    Agent with LangMem long-term memory capabilities.
+    Provides per-chat scoped memory isolation and static system prompts.
+    """
+
     def __init__(
-        self, 
-        settings: Settings, 
-        db_client: MongoDBClient, 
-        memory_store: MemoryStore
+        self,
+        settings: Settings,
+        db_client: MongoDBClient,
+        memory_store: MemoryStore,
     ):
         self.settings = settings
         self.db_client = db_client
         self.memory_store = memory_store
-        
-        # Initialize LLM
-        self.llm = ChatOpenAI(
-            model=settings.llm_model,
-            temperature=0.3
-        )
-        
-        # Initialize checkpointer
+
+        # Initialize OpenAI client
+        self.openai_client = OpenAIClient(settings)
+        self.llm = self.openai_client.llm
+
+        # MongoDB checkpointing for tool/agent state
         self.checkpointer = MongoDBSaver(
             client=db_client.client,
             db_name=settings.db_name,
-            checkpoint_collection_name="checkpoints"
+            checkpoint_collection_name="checkpoints",
         )
-        
-        # Create memory tools
-        self.memory_tools = [
-            create_manage_memory_tool(namespace=("user_memories",)),
-            create_search_memory_tool(namespace=("user_memories",)),
-        ]
-        
-        # Create agent
-        self.agent = create_react_agent(
-            self.llm,
-            tools=self.memory_tools,
-            checkpointer=self.checkpointer,
-            store=self.memory_store.store,
-        )
-        
-        logger.info(f"Created LangMemAgent with {len(self.memory_tools)} memory tools")
-    
-    def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
-        """Create system prompt with user context"""
-        return SystemPrompts.get_langmem_agent_prompt(user_metadata)
-    
-    async def _search_memories(self, user_metadata: Dict[str, Any], query: str) -> str:
-        """Search for relevant memories using MongoDB text search"""
-        try:
-            user_id = user_metadata.get('user_id')
-            chat_id = user_metadata.get('chat_id')
-            username = user_metadata.get('username', '')
-            
-            db = self.db_client.client[self.settings.db_name]
-            collection = db["langmem_store"]
-            
-            # Search for memories related to this user/chat
-            search_patterns = [
-                f"ID: {user_id}",
-                f"@{username}",
-                f"Chat ID: {chat_id}",
-                user_id,
-                username
-            ]
-            
-            # Build search query
-            search_query = {
-                "$or": [
-                    {"value.content": {"$regex": pattern, "$options": "i"}}
-                    for pattern in search_patterns if pattern
-                ]
-            }
-            
-            # Execute search
-            results = list(collection.find(search_query).limit(10))
-            
-            if results:
-                memory_texts = []
-                for doc in results:
-                    value = doc.get('value', {})
-                    content = value.get('content', '')
-                    if content:
-                        memory_texts.append(f"- {content}")
-                
-                if memory_texts:
-                    logger.debug(f"Found {len(memory_texts)} memories for user {user_id}")
-                    return "\n".join(memory_texts)
-            
-            logger.debug(f"No memories found for user {user_id}")
-            return "No relevant memories found."
-                    
-        except Exception as e:
-            logger.error(f"Error searching memories: {e}", exc_info=True)
-            return "No relevant memories found."
-    
-    async def _prepare_messages(
-        self, 
-        user_input: str, 
-        user_metadata: Dict[str, Any]
-    ) -> List[Dict[str, str]]:
-        """Prepare messages with memory context"""
-        # Search for relevant memories
-        memory_context = await self._search_memories(user_metadata, user_input)
-        
-        # Create system prompt with memories
-        system_prompt = self.create_system_prompt(user_metadata)
-        logger.info(f"Base system: {system_prompt}")
-        # Format user message
-        user_message = SystemPrompts.format_user_message(user_input, user_metadata)
-        logger.info(f"User message: {user_message}")
+
+        # Static system prompt
+        self._static_system_prompt = SystemPrompts.get_static_system_prompt()
+
+        logger.info("LangMemAgent initialized")
+
+    # ---------- INTERNAL HELPERS ----------
+
+    def _create_memory_tools(self, namespace: tuple) -> List[Any]:
+        """Create a pair of memory tools bound to a namespace."""
         return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            create_manage_memory_tool(
+                store=self.memory_store.store,
+                namespace=namespace,
+            ),
+            create_search_memory_tool(
+                store=self.memory_store.store,
+                namespace=namespace,
+            ),
         ]
-    
+
+    def _create_agent_with_tools(self, tools: List[Any]):
+        """Create an agent configured with the given tools."""
+        return create_agent(
+            self.llm,
+            tools=tools,
+            checkpointer=self.checkpointer,
+            system_prompt=self._static_system_prompt,
+            debug=False,
+        )
+
+    async def _prepare_messages(
+        self,
+        user_input: str,
+        user_metadata: Dict[str, Any],
+    ) -> List[Dict[str, str]]:
+        """Build the contextual user message including metadata."""
+        current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+
+        chat_type = user_metadata.get("chat_type", "unknown")
+        chat_title = user_metadata.get("chat_title", "a chat")
+        chat_id = user_metadata.get("chat_id")
+        user_id = user_metadata.get("user_id")
+        username = user_metadata.get("username", "N/A")
+        full_name = user_metadata.get("full_name", "N/A")
+
+        contextual_header = (
+            f"Context:\n"
+            f"- Time: {current_datetime}\n"
+            f"- User: {full_name} (@{username}, ID: {user_id})\n"
+            f"- Chat: {chat_title} (ID: {chat_id}, Type: {chat_type})\n\n"
+        )
+
+        return [
+            {
+                "role": "user",
+                "content": contextual_header + user_input,
+            }
+        ]
+
+    # ---------- PUBLIC API ----------
+
     async def get_response(
-        self, 
-        chat_id: str, 
-        user_id: str, 
-        user_input: str, 
-        user_metadata: Dict[str, Any]
+        self,
+        chat_id: str,
+        user_id: str,
+        user_input: str,
+        user_metadata: Dict[str, Any],
     ) -> str:
-        """Get response from the agent"""
+        """Generate a response using per-chat memory."""
+        
         try:
-            # Prepare messages
+            # Prepare full message context
             messages = await self._prepare_messages(user_input, user_metadata)
-            
-            # Configure agent
+
+            # Define per-chat namespace
+            namespace = (f"chat_{chat_id}",)
+
+            # Build chat-scoped memory tools
+            memory_tools = self._create_memory_tools(namespace)
+
+            # Build agent bound to those tools
+            agent = self._create_agent_with_tools(memory_tools)
+
+            # Prepare session ID (chat-specific)
+            session_id = f"telegram_chat_{chat_id}"
+
+            # Config with metadata for logging and debugging
             config = {
                 "configurable": {
-                    "thread_id": f"telegram_chat_{chat_id}",
+                    "thread_id": session_id,
                     "user_id": user_id,
                     "chat_id": chat_id,
+                },
+                "metadata": {
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "chat_type": user_metadata.get("chat_type"),
+                    "chat_title": user_metadata.get("chat_title"),
+                    "username": user_metadata.get("username"),
+                    "full_name": user_metadata.get("full_name"),
+                    "timestamp": datetime.now().isoformat(),
                 }
             }
-            
-            logger.debug(f"Invoking agent for user {user_id} in chat {chat_id}")
-            
+
             # Invoke agent
-            result = await self.agent.ainvoke(
+            result = await agent.ainvoke(
                 {
                     "messages": messages,
                     "user_metadata": user_metadata,
                 },
-                config=config
+                config=config,
             )
-            
-            # Extract response
+
             last_message = result["messages"][-1]
-            response_content = last_message.content
-            
-            logger.debug(f"Agent response generated for chat {chat_id}")
-            return response_content
-            
-        except Exception as e:
-            logger.error(f"Error in get_response for user {user_id} in chat {chat_id}: {e}", exc_info=True)
-            raise
+            response = last_message.content
+
+            logger.debug(f"Agent response generated for user={user_id}, chat={chat_id}")
+
+            return response
+
+        except Exception as exc:
+            logger.error(
+                f"LangMemAgent failed for user={user_id}, chat={chat_id}: {exc}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                "Failed to generate agent response. Check logs for details."
+            ) from exc
+
+    def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
+        """Return the system prompt (static for now, can be extended with metadata)."""
+        return self._static_system_prompt
