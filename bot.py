@@ -13,37 +13,43 @@ from user_manager import get_user_profile
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    logger.info(f"User {user.id} (@{user.username}) started the bot")
+    chat = update.effective_chat
+    logger.info(f"User {user.id} (@{user.username}) started the bot in chat {chat.id} ({chat.type})")
     
     await update.message.reply_text(
         "👋 Hi! I'm an AI assistant powered by OpenAI GPT-4o Mini.\n"
-        "I can remember our conversation history.\n"
+        "I can remember conversations in this group and individual preferences.\n"
         "Just chat naturally and I'll help you!"
     )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    chat = update.effective_chat
     user_id = str(user.id)
+    chat_id = str(chat.id)
     user_input = update.message.text
     
-    logger.info(f"Received message from {user_id} (@{user.username}): {user_input[:50]}...")
+    logger.info(f"Received message from {user_id} (@{user.username}) in chat {chat_id} ({chat.type}): {user_input[:50]}...")
     
-    # Simplified user metadata
+    # Enhanced user metadata with chat context
     user_metadata = {
         "user_id": user_id,
         "username": user.username or "N/A",
         "full_name": user.full_name or "N/A",
+        "chat_id": chat_id,
+        "chat_type": chat.type,  # 'private', 'group', 'supergroup', 'channel'
+        "chat_title": chat.title if hasattr(chat, 'title') else "Private Chat",
     }
 
     try:
-        # Get response from chain
-        response = await get_response(user_id, user_input, user_metadata)
+        # Get response from chain - uses chat_id for shared context
+        response = await get_response(chat_id, user_id, user_input, user_metadata)
         await update.message.reply_text(response)
-        logger.info(f"Sent response to user {user_id}")
+        logger.info(f"Sent response to user {user_id} in chat {chat_id}")
         
     except Exception as e:
-        logger.error(f"Error handling message from user {user_id}: {str(e)}", exc_info=True)
+        logger.error(f"Error handling message from user {user_id} in chat {chat_id}: {str(e)}", exc_info=True)
         await update.message.reply_text(
             "Sorry, I encountered an error processing your message. Please try again."
         )
