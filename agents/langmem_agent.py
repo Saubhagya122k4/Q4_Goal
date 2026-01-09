@@ -15,10 +15,7 @@ logger = setup_logger()
 
 
 class LangMemAgent(BaseAgent):
-    """
-    Agent with LangMem long-term memory capabilities.
-    Provides per-chat scoped memory isolation and static system prompts.
-    """
+    """Agent with LangMem long-term memory capabilities"""
 
     def __init__(
         self,
@@ -29,27 +26,36 @@ class LangMemAgent(BaseAgent):
         self.settings = settings
         self.db_client = db_client
         self.memory_store = memory_store
-
-        # Initialize OpenAI client
         self.openai_client = OpenAIClient(settings)
         self.llm = self.openai_client.llm
+        self._checkpointer = None
+        self._static_system_prompt = SystemPrompts.get_static_system_prompt()
+        self._initialized = False
 
-        # MongoDB checkpointing for tool/agent state
-        self.checkpointer = MongoDBSaver(
-            client=db_client.client,
-            db_name=settings.db_name,
+    async def initialize(self):
+        """Initialize agent with async components"""
+        if self._initialized:
+            return
+        
+        # Initialize MongoDB checkpointer with sync client
+        self._checkpointer = MongoDBSaver(
+            client=self.db_client.sync_client,
+            db_name=self.settings.db_name,
             checkpoint_collection_name="checkpoints",
         )
+        
+        self._initialized = True
+        logger.info("✅ LangMemAgent initialized")
 
-        # Static system prompt
-        self._static_system_prompt = SystemPrompts.get_static_system_prompt()
-
-        logger.info("LangMemAgent initialized")
-
-    # ---------- INTERNAL HELPERS ----------
+    @property
+    def checkpointer(self):
+        """Get checkpointer instance"""
+        if not self._initialized or self._checkpointer is None:
+            raise RuntimeError("LangMemAgent not initialized. Call initialize() first.")
+        return self._checkpointer
 
     def _create_memory_tools(self, namespace: tuple) -> List[Any]:
-        """Create a pair of memory tools bound to a namespace."""
+        """Create memory tools bound to a namespace"""
         return [
             create_manage_memory_tool(
                 store=self.memory_store.store,
@@ -62,7 +68,7 @@ class LangMemAgent(BaseAgent):
         ]
 
     def _create_agent_with_tools(self, tools: List[Any]):
-        """Create an agent configured with the given tools."""
+        """Create an agent configured with the given tools"""
         return create_agent(
             self.llm,
             tools=tools,
@@ -76,7 +82,7 @@ class LangMemAgent(BaseAgent):
         user_input: str,
         user_metadata: Dict[str, Any],
     ) -> List[Dict[str, str]]:
-        """Build the contextual user message including metadata."""
+        """Build contextual user message including metadata"""
         current_datetime = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         chat_type = user_metadata.get("chat_type", "unknown")
@@ -100,8 +106,6 @@ class LangMemAgent(BaseAgent):
             }
         ]
 
-    # ---------- PUBLIC API ----------
-
     async def get_response(
         self,
         chat_id: str,
@@ -109,25 +113,28 @@ class LangMemAgent(BaseAgent):
         user_input: str,
         user_metadata: Dict[str, Any],
     ) -> str:
-        """Generate a response using per-chat memory."""
+        """Generate a response using per-chat memory"""
+        
+        if not self._initialized:
+            raise RuntimeError("LangMemAgent not initialized. Call initialize() first.")
         
         try:
-            # Prepare full message context
+            # Prepare messages
             messages = await self._prepare_messages(user_input, user_metadata)
 
             # Define per-chat namespace
             namespace = (f"chat_{chat_id}",)
 
-            # Build chat-scoped memory tools
+            # Build memory tools
             memory_tools = self._create_memory_tools(namespace)
 
-            # Build agent bound to those tools
+            # Build agent
             agent = self._create_agent_with_tools(memory_tools)
 
-            # Prepare session ID (chat-specific)
+            # Session ID
             session_id = f"telegram_chat_{chat_id}"
 
-            # Config with metadata for logging and debugging
+            # Config
             config = {
                 "configurable": {
                     "thread_id": session_id,
@@ -154,22 +161,15 @@ class LangMemAgent(BaseAgent):
                 config=config,
             )
 
-            last_message = result["messages"][-1]
-            response = last_message.content
-
-            logger.debug(f"Agent response generated for user={user_id}, chat={chat_id}")
+            response = result["messages"][-1].content
+            logger.debug(f"Response generated for user={user_id}, chat={chat_id}")
 
             return response
 
         except Exception as exc:
-            logger.error(
-                f"LangMemAgent failed for user={user_id}, chat={chat_id}: {exc}",
-                exc_info=True,
-            )
-            raise RuntimeError(
-                "Failed to generate agent response. Check logs for details."
-            ) from exc
+            logger.error(f"Agent failed for user={user_id}, chat={chat_id}: {exc}", exc_info=True)
+            raise RuntimeError("Failed to generate response") from exc
 
     def create_system_prompt(self, user_metadata: Dict[str, Any]) -> str:
-        """Return the system prompt (static for now, can be extended with metadata)."""
+        """Return the system prompt"""
         return self._static_system_prompt
